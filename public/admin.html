@@ -1,4 +1,93 @@
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>THE BOOTH — Control</title><style>body{font-family:-apple-system;background:#f3f3f3;margin:0}.wrap{max-width:1000px;margin:auto;padding:30px}h1{font-size:38px}.card{background:#fff;border-radius:14px;padding:18px;margin:16px 0}textarea,input{width:100%;box-sizing:border-box;padding:10px;margin:5px 0}.q{display:grid;grid-template-columns:1fr 100px;gap:10px}.clips{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.clip{background:#fff;padding:12px;border-radius:12px}video{width:100%;background:#000}.btn{padding:12px 18px;border:0;border-radius:9px;background:#111;color:#fff;font-weight:700}</style></head><body><div class="wrap"><h1>THE BOOTH — Control</h1><div class="card"><h2>Questions</h2><div id="qs"></div><button class="btn" onclick="saveQ()">PUBLISH TO BOOTHS</button></div><h2>Latest clips</h2><div class="clips" id="clips"></div></div><script>
-async function load(){let qs=await (await fetch('/api/questions')).json();document.querySelector('#qs').innerHTML=qs.map((q,i)=>`<div class=q><textarea data-id="${q.id}">${q.text}</textarea><input type=number min=5 max=120 value="${q.seconds}"></div>`).join('');let clips=await (await fetch('/api/clips')).json();document.querySelector('#clips').innerHTML=clips.map(c=>`<div class=clip><b>${c.participantName}</b><div>${c.ageBracket||''} ${c.postcode||''}</div><p>${c.question}</p><video controls src="${c.url}"></video><small>${new Date(c.recordedAt).toLocaleString()}</small></div>`).join('')||'<p>No clips yet.</p>'}
-async function saveQ(){let rows=[...document.querySelectorAll('.q')];let data=rows.map(r=>({id:r.querySelector('textarea').dataset.id,text:r.querySelector('textarea').value,seconds:+r.querySelector('input').value,enabled:true}));await fetch('/api/questions',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});alert('Published');}load();setInterval(load,5000);
+let lastClipSignature = '';
+let refreshPending = false;
+
+async function loadQuestions() {
+  const qs = await (await fetch('/api/questions', { cache: 'no-store' })).json();
+  document.querySelector('#qs').innerHTML = qs.map((q,i) =>
+    `<div class=q><textarea data-id="${q.id}">${q.text}</textarea><input type=number min=5 max=120 value="${q.seconds}"></div>`
+  ).join('');
+}
+
+function anyVideoPlaying() {
+  return [...document.querySelectorAll('#clips video')].some(v =>
+    !v.paused && !v.ended && v.readyState > 2
+  );
+}
+
+function clipSignature(clips) {
+  return clips.map(c => [c.id || '', c.filename || '', c.recordedAt || '', c.url || ''].join('|')).join('||');
+}
+
+async function refreshClips(force = false) {
+  if (!force && anyVideoPlaying()) {
+    refreshPending = true;
+    return;
+  }
+
+  const clips = await (await fetch('/api/clips', { cache: 'no-store' })).json();
+  const signature = clipSignature(clips);
+
+  // Do not rebuild the video elements unless the clip list has actually changed.
+  if (!force && signature === lastClipSignature) {
+    refreshPending = false;
+    return;
+  }
+
+  lastClipSignature = signature;
+  document.querySelector('#clips').innerHTML = clips.map(c =>
+    `<div class=clip>
+      <b>${c.participantName}</b>
+      <div>${c.ageBracket||''} ${c.postcode||''}</div>
+      <p>${c.question}</p>
+      <video controls preload="metadata" src="${c.url}"></video>
+      <small>${new Date(c.recordedAt).toLocaleString()}</small>
+    </div>`
+  ).join('') || '<p>No clips yet.</p>';
+
+  refreshPending = false;
+
+  // If an automatic refresh was skipped while a video was playing,
+  // refresh as soon as playback ends or is paused.
+  document.querySelectorAll('#clips video').forEach(video => {
+    const resumeRefresh = () => {
+      if (refreshPending || !anyVideoPlaying()) {
+        setTimeout(() => refreshClips(), 250);
+      }
+    };
+    video.addEventListener('ended', resumeRefresh);
+    video.addEventListener('pause', resumeRefresh);
+  });
+}
+
+async function saveQ() {
+  const rows = [...document.querySelectorAll('.q')];
+  const data = rows.map(r => ({
+    id: r.querySelector('textarea').dataset.id,
+    text: r.querySelector('textarea').value,
+    seconds: +r.querySelector('input').value,
+    enabled: true
+  }));
+  await fetch('/api/questions', {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(data)
+  });
+  alert('Published');
+}
+
+async function initialise() {
+  await loadQuestions();
+  await refreshClips(true);
+}
+
+initialise();
+
+// Check for new clips every 30 seconds. Playback is never interrupted.
+setInterval(() => refreshClips(), 30000);
+
+// Also pick up new clips promptly when the admin tab becomes active again.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshClips();
+});
 </script></body></html>
