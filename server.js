@@ -278,7 +278,7 @@ const storage = multer.diskStorage({
 
     cb(
       null,
-      `${Date.now()}_${safeSession}_${safeQuestion}.mov`
+      `${Date.now()}_${safeSession}_${safeQuestion}${path.extname(file.originalname).toLowerCase() === '.mp4' ? '.mp4' : '.mov'}`
     );
   }
 });
