@@ -57,6 +57,14 @@ app.get('/pass.html', (_, res) =>
   res.sendFile(path.join(__dirname, 'public', 'pass.html'))
 );
 
+app.get(['/results', '/results.html'], (_, res) =>
+  res.sendFile(path.join(__dirname, 'public', 'results.html'))
+);
+
+app.get(['/research', '/research.html'], (_, res) =>
+  res.sendFile(path.join(__dirname, 'public', 'research.html'))
+);
+
 // -----------------------------------------------------------------------------
 // Database
 // -----------------------------------------------------------------------------
@@ -82,6 +90,21 @@ const defaultDB = {
       enabled: true
     }
   ],
+  pollQuestions: [
+    {
+      id: 'poll1',
+      text: 'Which issue matters most to you right now?',
+      options: ['Cost of living', 'Health', 'Housing', 'Education', 'Other'],
+      enabled: true
+    },
+    {
+      id: 'poll2',
+      text: 'How engaged are you with this issue?',
+      options: ['Very engaged', 'Somewhat engaged', 'Not very engaged', 'Not at all'],
+      enabled: true
+    }
+  ],
+  pollResponses: [],
   participants: {},
   sessions: {},
   clips: []
@@ -93,7 +116,17 @@ function loadDB() {
   }
 
   try {
-    return JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+    const db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+
+    // Lightweight migration so older prototype data.json files continue to work.
+    if (!Array.isArray(db.questions)) db.questions = structuredClone(defaultDB.questions);
+    if (!Array.isArray(db.pollQuestions)) db.pollQuestions = structuredClone(defaultDB.pollQuestions);
+    if (!Array.isArray(db.pollResponses)) db.pollResponses = [];
+    if (!db.participants || typeof db.participants !== 'object') db.participants = {};
+    if (!db.sessions || typeof db.sessions !== 'object') db.sessions = {};
+    if (!Array.isArray(db.clips)) db.clips = [];
+
+    return db;
   } catch (error) {
     console.error('Could not read data.json:', error);
     return structuredClone(defaultDB);
@@ -149,6 +182,188 @@ app.put('/api/questions', (req, res) => {
 
   saveDB(db);
   res.json(db.questions);
+});
+
+// -----------------------------------------------------------------------------
+// Quick poll questions and live aggregate results
+// -----------------------------------------------------------------------------
+
+app.get('/api/poll-questions', (_, res) => {
+  const db = loadDB();
+  res.json(db.pollQuestions.filter(q => q.enabled));
+});
+
+app.put('/api/poll-questions', (req, res) => {
+  const incoming = Array.isArray(req.body) ? req.body : [];
+  const db = loadDB();
+
+  db.pollQuestions = incoming
+    .map((q, i) => ({
+      id: String(q.id || `poll${i + 1}`)
+        .replace(/[^a-z0-9_-]/gi, '')
+        .slice(0, 40) || `poll${i + 1}`,
+      text: String(q.text || '').trim(),
+      options: Array.isArray(q.options)
+        ? q.options.map(v => String(v).trim()).filter(Boolean).slice(0, 12)
+        : String(q.options || '')
+            .split(',')
+            .map(v => v.trim())
+            .filter(Boolean)
+            .slice(0, 12),
+      enabled: q.enabled !== false
+    }))
+    .filter(q => q.text && q.options.length >= 2);
+
+  saveDB(db);
+  res.json(db.pollQuestions);
+});
+
+app.post('/api/poll-response', (req, res) => {
+  const { participantId, sessionToken, answers } = req.body || {};
+  const db = loadDB();
+
+  const session = db.sessions[sessionToken];
+  if (!participantId || !session || session.participantId !== participantId) {
+    return res.status(400).json({ error: 'Invalid participant or session.' });
+  }
+
+  if (!answers || typeof answers !== 'object') {
+    return res.status(400).json({ error: 'No poll answers supplied.' });
+  }
+
+  const cleanedAnswers = {};
+  for (const q of db.pollQuestions.filter(q => q.enabled)) {
+    const answer = String(answers[q.id] || '').trim();
+    if (answer && q.options.includes(answer)) {
+      cleanedAnswers[q.id] = answer;
+    }
+  }
+
+  if (!Object.keys(cleanedAnswers).length) {
+    return res.status(400).json({ error: 'Please answer at least one poll question.' });
+  }
+
+  db.pollResponses = db.pollResponses.filter(
+    r => !(r.participantId === participantId && r.sessionToken === sessionToken)
+  );
+
+  db.pollResponses.push({
+    id: token(),
+    participantId,
+    sessionToken,
+    answers: cleanedAnswers,
+    createdAt: new Date().toISOString()
+  });
+
+  saveDB(db);
+  res.json({ ok: true, answered: Object.keys(cleanedAnswers).length });
+});
+
+app.get('/api/poll-results', (_, res) => {
+  const db = loadDB();
+
+  const results = db.pollQuestions
+    .filter(q => q.enabled)
+    .map(q => {
+      const counts = Object.fromEntries(q.options.map(option => [option, 0]));
+      let total = 0;
+
+      for (const response of db.pollResponses) {
+        const answer = response.answers?.[q.id];
+        if (answer && Object.prototype.hasOwnProperty.call(counts, answer)) {
+          counts[answer] += 1;
+          total += 1;
+        }
+      }
+
+      return {
+        id: q.id,
+        text: q.text,
+        total,
+        options: q.options.map(option => ({
+          option,
+          count: counts[option],
+          percent: total ? Math.round((counts[option] / total) * 1000) / 10 : 0
+        }))
+      };
+    });
+
+  res.json({
+    updatedAt: new Date().toISOString(),
+    responseCount: db.pollResponses.length,
+    results
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Research dashboard API
+// -----------------------------------------------------------------------------
+
+function safeParticipantView(p = {}) {
+  return {
+    ageBracket: p.ageBracket || '',
+    postcode: p.postcode || '',
+    gender: p.gender || '',
+    contactOK: !!p.contactOK
+  };
+}
+
+app.get('/api/research-data', (_, res) => {
+  const db = loadDB();
+
+  const respondents = db.pollResponses.map(r => {
+    const p = db.participants[r.participantId] || {};
+    const clips = db.clips.filter(c => c.participantId === r.participantId).map(c => ({
+      id: c.id,
+      questionId: c.questionId || '',
+      question: c.question || '',
+      recordedAt: c.recordedAt,
+      url: c.url
+    }));
+
+    return {
+      responseId: r.id,
+      participantId: r.participantId,
+      createdAt: r.createdAt,
+      demographics: safeParticipantView(p),
+      answers: r.answers || {},
+      clips
+    };
+  });
+
+  res.json({
+    generatedAt: new Date().toISOString(),
+    pollQuestions: db.pollQuestions.filter(q => q.enabled),
+    respondentCount: respondents.length,
+    respondents
+  });
+});
+
+app.get('/api/research-export.csv', (_, res) => {
+  const db = loadDB();
+  const questions = db.pollQuestions.filter(q => q.enabled);
+  const headers = [
+    'response_id','created_at','age_bracket','postcode','gender','contact_permission',
+    ...questions.map(q => q.text)
+  ];
+
+  const csvEscape = value => {
+    const str = String(value ?? '');
+    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+  };
+
+  const rows = db.pollResponses.map(r => {
+    const p = db.participants[r.participantId] || {};
+    return [
+      r.id, r.createdAt, p.ageBracket || '', p.postcode || '', p.gender || '',
+      p.contactOK ? 'Yes' : 'No',
+      ...questions.map(q => r.answers?.[q.id] || '')
+    ].map(csvEscape).join(',');
+  });
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="the-booth-research-export.csv"');
+  res.send([headers.map(csvEscape).join(','), ...rows].join('\n'));
 });
 
 // -----------------------------------------------------------------------------

@@ -1,0 +1,154 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>THE BOOTH — Research Dashboard</title>
+<style>
+:root{--bg:#0d151c;--panel:#17232d;--panel2:#202f3a;--text:#fff;--muted:#9eadb8;--teal:#18b8b1;--red:#e43b2f;--line:#33434e}
+*{box-sizing:border-box} body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}
+.wrap{max-width:1440px;margin:auto;padding:26px}.top{display:flex;justify-content:space-between;align-items:end;gap:18px;flex-wrap:wrap}
+h1{margin:0;font-size:38px}.sub,.muted{color:var(--muted)}.actions{display:flex;gap:10px;flex-wrap:wrap}
+button,a.btn,select{border:0;border-radius:9px;padding:10px 13px;font-weight:700;font-size:14px}
+button,a.btn{background:var(--teal);color:#071312;text-decoration:none;cursor:pointer}.secondary{background:#e8edf0!important;color:#111!important}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:20px 0}.kpi,.card{background:var(--panel);border-radius:15px;padding:18px}
+.kpi .n{font-size:30px;font-weight:800}.kpi .l{font-size:12px;color:var(--muted);margin-top:4px}
+.filters{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.filters label{font-size:11px;color:var(--muted);display:block;margin-bottom:5px}
+select{width:100%;background:var(--panel2);color:white;border:1px solid var(--line)}
+.grid{display:grid;grid-template-columns:1.05fr .95fr;gap:16px;margin-top:16px}.card h2{margin:0 0 14px;font-size:20px}
+.questionTabs{display:flex;gap:8px;overflow:auto;padding-bottom:8px}.qtab{white-space:nowrap;background:var(--panel2);color:white}.qtab.active{background:var(--teal);color:#071312}
+.row{margin:13px 0}.lab{display:flex;justify-content:space-between;gap:10px;margin-bottom:5px;font-size:13px}.track{height:22px;background:#2b3a45;border-radius:7px;overflow:hidden}.bar{height:100%;background:var(--teal);transition:width .3s}
+.cross{width:100%;border-collapse:collapse;font-size:12px}.cross th,.cross td{border-bottom:1px solid var(--line);padding:9px;text-align:right}.cross th:first-child,.cross td:first-child{text-align:left}.cross th{color:var(--muted)}
+.videoList{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;max-height:560px;overflow:auto}.clip{background:var(--panel2);border-radius:12px;padding:10px}.clip video{width:100%;background:#000;border-radius:8px}.clip .meta{font-size:11px;color:var(--muted);margin:6px 0}.clip .q{font-size:12px;min-height:34px}
+.empty{color:var(--muted);padding:18px 0}.note{font-size:11px;color:var(--muted);margin-top:12px}
+@media(max-width:900px){.kpis{grid-template-columns:repeat(2,1fr)}.filters{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body><div class="wrap">
+<div class="top"><div><h1>THE BOOTH — RESEARCH</h1><div class="sub">Mixed-method research dashboard: structured responses + qualitative video</div></div>
+<div class="actions"><a class="btn secondary" href="/admin">CONTROL</a><a class="btn secondary" href="/results" target="_blank">PUBLIC RESULTS</a><a class="btn" href="/api/research-export.csv">EXPORT CSV</a></div></div>
+
+<div class="kpis">
+ <div class="kpi"><div class="n" id="kRespondents">0</div><div class="l">RESPONDENTS</div></div>
+ <div class="kpi"><div class="n" id="kClips">0</div><div class="l">VIDEO RESPONSES</div></div>
+ <div class="kpi"><div class="n" id="kQuestions">0</div><div class="l">POLL QUESTIONS</div></div>
+ <div class="kpi"><div class="n" id="kContact">0%</div><div class="l">FOLLOW-UP PERMISSION</div></div>
+</div>
+
+<div class="card">
+ <h2>Filter respondents</h2>
+ <div class="filters">
+  <div><label>AGE</label><select id="fAge"><option value="">All ages</option></select></div>
+  <div><label>POSTCODE</label><select id="fPostcode"><option value="">All postcodes</option></select></div>
+  <div><label>GENDER</label><select id="fGender"><option value="">All genders</option></select></div>
+  <div><label>CONTACT PERMISSION</label><select id="fContact"><option value="">All</option><option value="yes">Yes</option><option value="no">No</option></select></div>
+  <div><label>FILTER BY ANSWER</label><select id="fAnswer"><option value="">All answers</option></select></div>
+ </div>
+ <div class="note">Filters affect the charts, cross-tab and qualitative video list below. Public results remain aggregate only.</div>
+</div>
+
+<div class="card">
+ <h2>Quantitative results</h2>
+ <div class="questionTabs" id="tabs"></div>
+ <div id="chart"></div>
+</div>
+
+<div class="grid">
+ <div class="card">
+  <h2>Cross-tabulation</h2>
+  <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+   <span class="muted" style="font-size:12px">Break current question by</span>
+   <select id="crossDim" style="width:auto"><option value="ageBracket">Age</option><option value="gender">Gender</option><option value="postcode">Postcode</option></select>
+  </div>
+  <div id="cross"></div>
+ </div>
+ <div class="card">
+  <h2>Qualitative video for current selection</h2>
+  <div class="muted" id="videoCount" style="font-size:12px;margin-bottom:10px"></div>
+  <div class="videoList" id="videos"></div>
+ </div>
+</div>
+<div class="note">Prototype research dashboard. For production research involving personal information, add authenticated researcher access, a proper database, project-level permissions and a documented retention/privacy policy.</div>
+</div>
+
+<script>
+let DATA={pollQuestions:[],respondents:[]}, currentQ='';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+const uniq=a=>[...new Set(a.filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true}));
+
+function fillSelect(id, vals, label){
+ const el=$(id), keep=el.value; el.innerHTML=`<option value="">${label}</option>`+vals.map(v=>`<option>${esc(v)}</option>`).join(''); el.value=keep;
+}
+function setupFilters(){
+ fillSelect('#fAge',uniq(DATA.respondents.map(r=>r.demographics.ageBracket)),'All ages');
+ fillSelect('#fPostcode',uniq(DATA.respondents.map(r=>r.demographics.postcode)),'All postcodes');
+ fillSelect('#fGender',uniq(DATA.respondents.map(r=>r.demographics.gender)),'All genders');
+ const answers=[];
+ DATA.pollQuestions.forEach(q=>q.options.forEach(o=>answers.push(`${q.id}|||${o}`)));
+ $('#fAnswer').innerHTML='<option value="">All answers</option>'+DATA.pollQuestions.flatMap(q=>q.options.map(o=>`<option value="${esc(q.id+'|||'+o)}">${esc(q.text)} — ${esc(o)}</option>`)).join('');
+}
+function filtered(){
+ const age=$('#fAge').value, pc=$('#fPostcode').value, g=$('#fGender').value, c=$('#fContact').value, a=$('#fAnswer').value;
+ return DATA.respondents.filter(r=>{
+   if(age&&r.demographics.ageBracket!==age)return false;
+   if(pc&&r.demographics.postcode!==pc)return false;
+   if(g&&r.demographics.gender!==g)return false;
+   if(c==='yes'&&!r.demographics.contactOK)return false;
+   if(c==='no'&&r.demographics.contactOK)return false;
+   if(a){const [qid,opt]=a.split('|||');if(r.answers[qid]!==opt)return false}
+   return true;
+ });
+}
+function renderTabs(){
+ $('#tabs').innerHTML=DATA.pollQuestions.map(q=>`<button class="qtab ${q.id===currentQ?'active':''}" data-id="${esc(q.id)}">${esc(q.text)}</button>`).join('');
+ document.querySelectorAll('.qtab').forEach(b=>b.onclick=()=>{currentQ=b.dataset.id;render()});
+}
+function renderKpis(rs){
+ $('#kRespondents').textContent=rs.length;
+ $('#kClips').textContent=rs.reduce((n,r)=>n+r.clips.length,0);
+ $('#kQuestions').textContent=DATA.pollQuestions.length;
+ $('#kContact').textContent=rs.length?Math.round(rs.filter(r=>r.demographics.contactOK).length/rs.length*100)+'%':'0%';
+}
+function renderChart(rs){
+ const q=DATA.pollQuestions.find(q=>q.id===currentQ); if(!q){$('#chart').innerHTML='<div class=empty>No poll question selected.</div>';return}
+ const counts=Object.fromEntries(q.options.map(o=>[o,0])); let total=0;
+ rs.forEach(r=>{const a=r.answers[q.id];if(a in counts){counts[a]++;total++}});
+ $('#chart').innerHTML=`<div class="muted" style="font-size:12px;margin:8px 0 14px">${total} filtered answers</div>`+q.options.map(o=>{
+   const n=counts[o],p=total?n/total*100:0;
+   return `<div class=row><div class=lab><span>${esc(o)}</span><b>${p.toFixed(1)}% &nbsp; (${n})</b></div><div class=track><div class=bar style="width:${p}%"></div></div></div>`;
+ }).join('');
+}
+function renderCross(rs){
+ const q=DATA.pollQuestions.find(q=>q.id===currentQ); if(!q){$('#cross').innerHTML='';return}
+ const dim=$('#crossDim').value;
+ const groups=uniq(rs.map(r=>r.demographics[dim]));
+ if(!groups.length){$('#cross').innerHTML='<div class=empty>No data for this breakdown.</div>';return}
+ const rows=groups.map(group=>{
+   const gr=rs.filter(r=>r.demographics[dim]===group), answered=gr.filter(r=>q.options.includes(r.answers[q.id]));
+   return {group,total:answered.length, vals:q.options.map(o=>answered.filter(r=>r.answers[q.id]===o).length)};
+ });
+ $('#cross').innerHTML=`<table class=cross><thead><tr><th>${dim==='ageBracket'?'Age':dim[0].toUpperCase()+dim.slice(1)}</th>${q.options.map(o=>`<th>${esc(o)}</th>`).join('')}<th>N</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${esc(row.group)}</td>${row.vals.map(n=>`<td>${row.total?(n/row.total*100).toFixed(0):0}%</td>`).join('')}<td>${row.total}</td></tr>`).join('')}</tbody></table>`;
+}
+function renderVideos(rs){
+ const q=DATA.pollQuestions.find(q=>q.id===currentQ);
+ let selected=rs;
+ if(q){
+   // Keep all clips for filtered respondents, but order people who answered current question first.
+   selected=[...rs].sort((a,b)=>(q.options.includes(b.answers[q.id])?1:0)-(q.options.includes(a.answers[q.id])?1:0));
+ }
+ const clips=selected.flatMap(r=>r.clips.map(c=>({c,r})));
+ $('#videoCount').textContent=`${clips.length} video response${clips.length===1?'':'s'} from filtered respondents`;
+ $('#videos').innerHTML=clips.length?clips.map(({c,r})=>`<div class=clip><video controls preload=metadata src="${esc(c.url)}"></video><div class=meta>${esc(r.demographics.ageBracket)} · ${esc(r.demographics.postcode)}${r.demographics.gender?' · '+esc(r.demographics.gender):''}</div><div class=q>${esc(c.question)}</div></div>`).join(''):'<div class=empty>No video responses match the current filters.</div>';
+}
+function render(){
+ const rs=filtered(); renderTabs(); renderKpis(rs); renderChart(rs); renderCross(rs); renderVideos(rs);
+}
+async function load(){
+ DATA=await (await fetch('/api/research-data',{cache:'no-store'})).json();
+ currentQ=currentQ||DATA.pollQuestions[0]?.id||'';
+ setupFilters(); render();
+}
+['#fAge','#fPostcode','#fGender','#fContact','#fAnswer','#crossDim'].forEach(id=>$(id).addEventListener('change',render));
+load(); setInterval(load,15000);
+</script>
+</body></html>
