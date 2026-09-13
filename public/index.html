@@ -40,13 +40,26 @@ const f=document.querySelector('#f'),out=document.querySelector('#out');
 let participantId='',sessionToken='';
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 
-function showPass(qrDataURL){
+function showPass(qrURL, token){
+  const imageURL = qrURL || `/api/pass-qr/${encodeURIComponent(token)}?v=${Date.now()}`;
   out.innerHTML=`<div class="card pass">
     <h2>Your THE BOOTH pass</h2>
     <p>Quick poll complete. Show this QR code to the booth camera.</p>
-    <img src="${qrDataURL}">
+    <img id="passQR" alt="THE BOOTH QR pass" src="${imageURL}">
+    <div id="qrStatus" class="small">Loading your Booth pass…</div>
     <p class="small">Keep this screen open until your Booth recording starts.</p>
   </div>`;
+
+  const img=document.querySelector('#passQR');
+  const status=document.querySelector('#qrStatus');
+  img.onload=()=>{ status.textContent='Your Booth pass is ready.'; };
+  img.onerror=()=>{
+    status.innerHTML='The pass image did not load. <button type="button" id="retryQR" style="width:auto;margin:8px 0 0;padding:9px 12px;font-size:14px">RETRY QR</button>';
+    document.querySelector('#retryQR').onclick=()=>{
+      status.textContent='Reloading your Booth pass…';
+      img.src=`/api/pass-qr/${encodeURIComponent(token)}?v=${Date.now()}`;
+    };
+  };
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
@@ -77,7 +90,7 @@ f.onsubmit=async e=>{
     f.style.display='none';
 
     if(!j.pollRequired){
-      showPass(j.qrDataURL);
+      showPass(j.qrURL, sessionToken);
       return;
     }
 
@@ -100,7 +113,7 @@ f.onsubmit=async e=>{
         pollButton.disabled=false;pollButton.textContent='SUBMIT POLL & GET MY BOOTH PASS';
         return;
       }
-      showPass(jj.qrDataURL);
+      showPass(jj.qrURL, sessionToken);
     };
   }catch(err){
     alert('Could not connect to THE BOOTH server. Please try again.');

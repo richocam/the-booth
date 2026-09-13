@@ -280,7 +280,8 @@ app.post('/api/poll-response', async (req, res) => {
       answered: Object.keys(cleanedAnswers).length,
       pollCompleted: true,
       sessionToken,
-      qrDataURL
+      qrDataURL,
+      qrURL: `/api/pass-qr/${encodeURIComponent(sessionToken)}`
     });
   } catch (error) {
     console.error('Poll response error:', error);
@@ -465,12 +466,46 @@ app.post('/api/register', async (req, res) => {
       pollRequired,
       pollCompleted: !pollRequired,
       qrDataURL,
+      qrURL: `/api/pass-qr/${encodeURIComponent(sessionToken)}`,
       demoVerification:
         'Prototype auto-verifies registration. Replace with SMS/email OTP in production.'
     });
   } catch (error) {
     console.error('Registration error:', error);
     res.status(500).json({ error: 'Registration failed.' });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Booth pass QR image
+// -----------------------------------------------------------------------------
+
+app.get('/api/pass-qr/:token', async (req, res) => {
+  try {
+    const db = loadDB();
+    const session = db.sessions[req.params.token];
+
+    if (!session || !session.verified) {
+      return res.status(404).send('Pass not found.');
+    }
+
+    if (session.pollRequired && !session.pollCompleted) {
+      return res.status(403).send('Quick poll must be completed before this pass is available.');
+    }
+
+    const png = await QRCode.toBuffer(session.token, {
+      type: 'png',
+      width: 520,
+      margin: 2,
+      errorCorrectionLevel: 'M'
+    });
+
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.send(png);
+  } catch (error) {
+    console.error('Pass QR error:', error);
+    res.status(500).send('Could not generate QR pass.');
   }
 });
 
