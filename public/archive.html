@@ -1,0 +1,42 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>THE BOOTH — Archive</title>
+<style>
+:root{--bg:#0d151c;--panel:#17232d;--panel2:#202f3a;--text:#fff;--muted:#9eadb8;--teal:#18b8b1;--red:#e43b2f;--line:#33434e}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}
+.wrap{max-width:1450px;margin:auto;padding:26px}h1{margin:0}.sub,.muted{color:var(--muted)}.top{display:flex;justify-content:space-between;gap:20px;align-items:end;flex-wrap:wrap}
+.actions{display:flex;gap:9px;flex-wrap:wrap}.btn,button{border:0;border-radius:9px;padding:10px 13px;font-weight:750;text-decoration:none;cursor:pointer;background:var(--teal);color:#071312}.light{background:#e8edf0;color:#111}.danger{background:#b42318;color:#fff}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:20px 0}.kpi,.card{background:var(--panel);border-radius:15px;padding:17px}.n{font-size:29px;font-weight:800}.l{font-size:11px;color:var(--muted)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}.card{margin-bottom:15px}.card h2{margin:0 0 13px}.question{padding:10px 0;border-bottom:1px solid var(--line)}.opts{font-size:12px;color:var(--muted);margin-top:5px}
+.chartrow{margin:12px 0}.lab{display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px}.track{height:20px;background:#2b3a45;border-radius:7px;overflow:hidden}.bar{height:100%;background:var(--teal)}
+.videos{display:grid;grid-template-columns:repeat(auto-fit,minmax(235px,1fr));gap:11px}.clip{background:var(--panel2);padding:10px;border-radius:11px}.clip video{width:100%;background:#000;border-radius:8px}.meta{font-size:11px;color:var(--muted);margin-top:6px}
+table{width:100%;border-collapse:collapse;font-size:11px;display:block;overflow:auto;max-height:420px}th,td{padding:8px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:left}th{color:var(--teal);position:sticky;top:0;background:var(--panel)}
+.purged{border:1px solid #70423e;background:#2c211f;padding:15px;border-radius:10px;color:#f2c3bd}
+@media(max-width:900px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
+</style></head><body><div class=wrap>
+<div class=top><div><div class=muted>THE BOOTH — ARCHIVE</div><h1 id=title>Loading archive…</h1><div class=sub id=date></div></div>
+<div class=actions><a class="btn light" href="/admin">BACK TO ADMIN</a><a class=btn id=csv>DOWNLOAD CSV</a><button class=danger id=purge>PURGE VIDEO</button></div></div>
+<div class=kpis><div class=kpi><div class=n id=respondents>0</div><div class=l>CONTRIBUTORS</div></div><div class=kpi><div class=n id=clips>0</div><div class=l>VIDEO CLIPS</div></div><div class=kpi><div class=n id=polls>0</div><div class=l>POLL QUESTIONS</div></div><div class=kpi><div class=n id=storage>0 B</div><div class=l>VIDEO STORAGE</div></div></div>
+<div class=grid><div class=card><h2>Quick poll questions & results</h2><div id=poll></div></div><div class=card><h2>Video questions</h2><div id=videoq></div></div></div>
+<div class=card><h2>Archived video</h2><div id=videos></div></div>
+<div class=card><h2>Contributor / research records</h2><div class=muted style="font-size:11px;margin-bottom:10px">This archive view is administrative and can contain personal information. It should be protected before production use.</div><div id=table></div></div>
+</div><script>
+const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+const id=new URLSearchParams(location.search).get('id');let D;
+function bytes(n){if(!n)return'0 B';let u=['B','KB','MB','GB','TB'],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(i?1:0)+' '+u[i]}
+async function load(){
+ if(!id){$('#title').textContent='Archive not specified';return}
+ const r=await fetch('/api/archives/'+encodeURIComponent(id),{cache:'no-store'});if(!r.ok){$('#title').textContent='Archive not found';return}D=await r.json();
+ const a=D.archive,m=D.manifest,rows=D.rows||[];
+ $('#title').textContent=a.label;$('#date').textContent=new Date(a.createdAt).toLocaleString();$('#respondents').textContent=a.counts?.participants||rows.length;$('#clips').textContent=a.counts?.clips||0;$('#polls').textContent=m.pollQuestions?.length||0;$('#storage').textContent=bytes(a.videoBytes);$('#csv').href='/api/archives/'+encodeURIComponent(id)+'/csv';
+ const polls=m.pollQuestions||[];
+ $('#poll').innerHTML=polls.length?polls.map(q=>{let counts=Object.fromEntries((q.options||[]).map(o=>[o,0])),total=0;rows.forEach(row=>{let v=row['poll:'+q.text];if(v in counts){counts[v]++;total++}});return `<div class=question><b>${esc(q.text)}</b>${(q.options||[]).map(o=>{let n=counts[o]||0,p=total?n/total*100:0;return `<div class=chartrow><div class=lab><span>${esc(o)}</span><b>${p.toFixed(1)}% (${n})</b></div><div class=track><div class=bar style="width:${p}%"></div></div></div>`}).join('')}</div>`}).join(''):'<div class=muted>No poll questions stored.</div>';
+ $('#videoq').innerHTML=(m.videoQuestions||[]).map((q,i)=>`<div class=question><b>${i+1}. ${esc(q.text)}</b><div class=opts>${q.seconds||''}${q.seconds?' seconds':''}</div></div>`).join('')||'<div class=muted>No video questions stored.</div>';
+ const vids=m.videos||[];
+ if(a.videosPurgedAt){$('#videos').innerHTML=`<div class=purged>Video files were purged on ${new Date(a.videosPurgedAt).toLocaleString()}. The CSV, questions and quantitative results remain available.</div>`;$('#purge').disabled=true;$('#purge').textContent='VIDEO PURGED'}
+ else $('#videos').innerHTML=vids.length?`<div class=videos>${vids.map(v=>`<div class=clip><video controls preload=metadata src="/api/archives/${encodeURIComponent(id)}/videos/${encodeURIComponent(v.filename)}"></video><div class=meta>${esc(v.question||'Video response')}<br>${esc(v.filename)}${v.locationId?'<br>Location: '+esc(v.locationId):''}${v.boothId?' · Booth: '+esc(v.boothId):''}${v.recordingFPS?' · '+esc(v.recordingFPS)+' fps':''}</div></div>`).join('')}</div>`:'<div class=muted>No archived videos.</div>';
+ if(rows.length){const headers=Object.keys(rows[0]);$('#table').innerHTML=`<table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${headers.map(h=>`<td>${esc(row[h])}</td>`).join('')}</tr>`).join('')}</tbody></table>`}else $('#table').innerHTML='<div class=muted>No contributor records.</div>';
+}
+$('#purge').onclick=async()=>{if(!confirm('Permanently delete ALL video files in this archive?\\n\\nThe CSV, questions and research results will remain. This cannot be undone.'))return;const r=await fetch('/api/archives/'+encodeURIComponent(id)+'/videos',{method:'DELETE'});if(!r.ok){alert('Could not purge video.');return}await load()};
+load();
+</script></body></html>

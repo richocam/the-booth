@@ -23,12 +23,14 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}
 // mounted at /var/data.
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const uploadsDir = path.join(DATA_DIR, 'uploads');
+const archivesDir = path.join(DATA_DIR, 'archives');
 const dbPath = path.join(DATA_DIR, 'data.json');
 
 // Make sure the data and uploads folders exist before Multer or the database
 // tries to write to them.
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(uploadsDir, { recursive: true });
+fs.mkdirSync(archivesDir, { recursive: true });
 
 // -----------------------------------------------------------------------------
 // Middleware
@@ -107,7 +109,8 @@ const defaultDB = {
   pollResponses: [],
   participants: {},
   sessions: {},
-  clips: []
+  clips: [],
+  archives: []
 };
 
 function loadDB() {
@@ -125,6 +128,7 @@ function loadDB() {
     if (!db.participants || typeof db.participants !== 'object') db.participants = {};
     if (!db.sessions || typeof db.sessions !== 'object') db.sessions = {};
     if (!Array.isArray(db.clips)) db.clips = [];
+    if (!Array.isArray(db.archives)) db.archives = [];
 
     return db;
   } catch (error) {
@@ -141,6 +145,113 @@ function token() {
   return crypto.randomBytes(12).toString('hex');
 }
 
+function safeSlug(value = '') {
+  return String(value)
+    .trim()
+    .replace(/[^a-z0-9 _-]/gi, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 60)
+    .replace(/^-|-$/g, '');
+}
+
+function csvEscape(value) {
+  const str = String(value ?? '');
+  return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+}
+
+function directoryBytes(dir) {
+  if (!fs.existsSync(dir)) return 0;
+  let total = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) total += directoryBytes(full);
+    else {
+      try { total += fs.statSync(full).size; } catch (_) {}
+    }
+  }
+  return total;
+}
+
+function activeDataCounts(db) {
+  return {
+    participants: Object.keys(db.participants || {}).length,
+    sessions: Object.keys(db.sessions || {}).length,
+    pollResponses: (db.pollResponses || []).length,
+    clips: (db.clips || []).length
+  };
+}
+
+function hasActiveResearchData(db) {
+  const c = activeDataCounts(db);
+  return c.participants > 0 || c.sessions > 0 || c.pollResponses > 0 || c.clips > 0;
+}
+
+function buildArchiveCSV(db) {
+  const pollQuestions = db.pollQuestions || [];
+  const videoQuestions = db.questions || [];
+  const pollHeaders = pollQuestions.map(q => `poll:${q.text}`);
+  const videoHeaders = videoQuestions.map(q => `video:${q.text}`);
+
+  const headers = [
+    'participant_id','name','mobile','email','age_bracket','postcode','gender',
+    'consent','contact_permission','registered_at','session_token','poll_completed',
+    'booth_ids','location_ids','device_ids','recording_frame_rates',
+    ...pollHeaders,
+    ...videoHeaders
+  ];
+
+  const sessionByParticipant = {};
+  for (const session of Object.values(db.sessions || {})) {
+    if (session?.participantId) sessionByParticipant[session.participantId] = session;
+  }
+
+  const pollByParticipant = {};
+  for (const response of db.pollResponses || []) {
+    pollByParticipant[response.participantId] = response;
+  }
+
+  const clipsByParticipant = {};
+  for (const clip of db.clips || []) {
+    (clipsByParticipant[clip.participantId] ||= []).push(clip);
+  }
+
+  const rows = Object.values(db.participants || {}).map(p => {
+    const session = sessionByParticipant[p.id] || {};
+    const response = pollByParticipant[p.id] || {};
+    const clips = clipsByParticipant[p.id] || [];
+
+    const videoCells = videoQuestions.map(q =>
+      clips
+        .filter(c => c.questionId === q.id || c.question === q.text)
+        .map(c => c.filename || path.basename(String(c.url || '')))
+        .filter(Boolean)
+        .join('; ')
+    );
+
+    return [
+      p.id, p.name, p.mobile, p.email, p.ageBracket, p.postcode, p.gender,
+      p.consent ? 'Yes' : 'No', p.contactOK ? 'Yes' : 'No', p.createdAt || '',
+      session.token || '', session.pollCompleted ? 'Yes' : 'No',
+      [...new Set(clips.map(c => c.boothId).filter(Boolean))].join('; '),
+      [...new Set(clips.map(c => c.locationId).filter(Boolean))].join('; '),
+      [...new Set(clips.map(c => c.deviceId).filter(Boolean))].join('; '),
+      [...new Set(clips.map(c => c.recordingFPS).filter(Boolean))].join('; '),
+      ...pollQuestions.map(q => response.answers?.[q.id] || ''),
+      ...videoCells
+    ].map(csvEscape).join(',');
+  });
+
+  return [headers.map(csvEscape).join(','), ...rows].join('\n');
+}
+
+function resetActiveResearchData(db) {
+  db.pollResponses = [];
+  db.participants = {};
+  db.sessions = {};
+  db.clips = [];
+}
+
 // -----------------------------------------------------------------------------
 // Health
 // -----------------------------------------------------------------------------
@@ -152,6 +263,241 @@ app.get('/api/health', (_, res) => {
     storagePath: DATA_DIR
   });
 });
+
+
+// -----------------------------------------------------------------------------
+// Archive / storage management
+// -----------------------------------------------------------------------------
+
+app.get('/api/archive-status', (_, res) => {
+  const db = loadDB();
+  res.json({
+    active: {
+      ...activeDataCounts(db),
+      videoBytes: directoryBytes(uploadsDir)
+    },
+    archives: (db.archives || []).map(a => ({
+      ...a,
+      videoBytes: directoryBytes(path.join(archivesDir, a.id, 'videos'))
+    }))
+  });
+});
+
+app.post('/api/archive', (req, res) => {
+  try {
+    const db = loadDB();
+
+    if (!hasActiveResearchData(db)) {
+      return res.status(400).json({ error: 'There is no active contributor data to archive.' });
+    }
+
+    const now = new Date();
+    const stamp = now.toISOString().replace(/[:.]/g, '-');
+    const label = safeSlug(req.body?.label || '') || now.toISOString().slice(0, 10);
+    const archiveId = `${stamp}_${label}`;
+    const archiveDir = path.join(archivesDir, archiveId);
+    const videoDir = path.join(archiveDir, 'videos');
+
+    fs.mkdirSync(videoDir, { recursive: true });
+
+    // Create the CSV before moving/resetting anything.
+    const csvName = 'responses.csv';
+    fs.writeFileSync(path.join(archiveDir, csvName), buildArchiveCSV(db), 'utf8');
+
+    // Preserve the exact question set and a non-secret snapshot of the archive.
+    const manifest = {
+      id: archiveId,
+      label: String(req.body?.label || '').trim() || now.toISOString().slice(0, 10),
+      createdAt: now.toISOString(),
+      videoQuestions: db.questions,
+      pollQuestions: db.pollQuestions,
+      counts: activeDataCounts(db),
+      videos: []
+    };
+
+    for (const clip of db.clips || []) {
+      const filename = clip.filename || path.basename(String(clip.url || ''));
+      if (!filename) continue;
+
+      const source = path.join(uploadsDir, filename);
+      const destination = path.join(videoDir, filename);
+
+      if (fs.existsSync(source)) {
+        fs.renameSync(source, destination);
+        manifest.videos.push({
+          clipId: clip.id,
+          participantId: clip.participantId,
+          questionId: clip.questionId || '',
+          question: clip.question || '',
+          filename,
+          recordedAt: clip.recordedAt || '',
+          boothId: clip.boothId || '',
+          locationId: clip.locationId || '',
+          deviceId: clip.deviceId || '',
+          recordingFPS: clip.recordingFPS || 25
+        });
+      }
+    }
+
+    fs.writeFileSync(
+      path.join(archiveDir, 'manifest.json'),
+      JSON.stringify(manifest, null, 2),
+      'utf8'
+    );
+
+    const archiveRecord = {
+      id: archiveId,
+      label: manifest.label,
+      createdAt: manifest.createdAt,
+      counts: manifest.counts,
+      csv: csvName,
+      videosPurgedAt: null
+    };
+
+    db.archives.push(archiveRecord);
+    resetActiveResearchData(db);
+    saveDB(db);
+
+    res.json({
+      ok: true,
+      archive: archiveRecord,
+      message: 'Archive created. Active contributor data has been reset and questions may now be changed.'
+    });
+  } catch (error) {
+    console.error('Archive error:', error);
+    res.status(500).json({ error: 'Could not create archive.' });
+  }
+});
+
+app.get('/api/archives/:id/csv', (req, res) => {
+  const db = loadDB();
+  const archive = (db.archives || []).find(a => a.id === req.params.id);
+  if (!archive) return res.status(404).send('Archive not found.');
+
+  const file = path.join(archivesDir, archive.id, archive.csv || 'responses.csv');
+  if (!fs.existsSync(file)) return res.status(404).send('Archive CSV not found.');
+
+  res.download(file, `THE-BOOTH_${safeSlug(archive.label) || archive.id}.csv`);
+});
+
+app.delete('/api/videos/active', (_, res) => {
+  try {
+    const db = loadDB();
+    let deleted = 0;
+    let bytes = 0;
+
+    for (const clip of db.clips || []) {
+      const filename = clip.filename || path.basename(String(clip.url || ''));
+      const file = filename ? path.join(uploadsDir, filename) : null;
+      if (file && fs.existsSync(file)) {
+        try {
+          bytes += fs.statSync(file).size;
+          fs.unlinkSync(file);
+          deleted++;
+        } catch (_) {}
+      }
+    }
+
+    // Remove clip metadata too, so the UI does not retain broken video links.
+    db.clips = [];
+    saveDB(db);
+
+    res.json({ ok: true, deleted, bytes });
+  } catch (error) {
+    console.error('Active video purge error:', error);
+    res.status(500).json({ error: 'Could not purge active videos.' });
+  }
+});
+
+app.delete('/api/archives/:id/videos', (req, res) => {
+  try {
+    const db = loadDB();
+    const archive = (db.archives || []).find(a => a.id === req.params.id);
+    if (!archive) return res.status(404).json({ error: 'Archive not found.' });
+
+    const videoDir = path.join(archivesDir, archive.id, 'videos');
+    const bytes = directoryBytes(videoDir);
+
+    if (fs.existsSync(videoDir)) {
+      fs.rmSync(videoDir, { recursive: true, force: true });
+    }
+
+    archive.videosPurgedAt = new Date().toISOString();
+    saveDB(db);
+
+    res.json({ ok: true, bytes });
+  } catch (error) {
+    console.error('Archive video purge error:', error);
+    res.status(500).json({ error: 'Could not purge archived videos.' });
+  }
+});
+
+
+app.get('/api/archives/:id', (req, res) => {
+  const db = loadDB();
+  const archive = (db.archives || []).find(a => a.id === req.params.id);
+  if (!archive) return res.status(404).json({ error: 'Archive not found.' });
+
+  const archiveDir = path.join(archivesDir, archive.id);
+  const manifestPath = path.join(archiveDir, 'manifest.json');
+  const csvPath = path.join(archiveDir, archive.csv || 'responses.csv');
+
+  let manifest = { videoQuestions: [], pollQuestions: [], videos: [] };
+  if (fs.existsSync(manifestPath)) {
+    try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); } catch (_) {}
+  }
+
+  let rows = [];
+  if (fs.existsSync(csvPath)) {
+    // Lightweight CSV parser that handles quoted cells and embedded commas/newlines.
+    const input = fs.readFileSync(csvPath, 'utf8');
+    const parsed = []; let row = [], cell = '', quoted = false;
+    for (let i = 0; i < input.length; i++) {
+      const ch = input[i];
+      if (quoted) {
+        if (ch === '"' && input[i+1] === '"') { cell += '"'; i++; }
+        else if (ch === '"') quoted = false;
+        else cell += ch;
+      } else {
+        if (ch === '"') quoted = true;
+        else if (ch === ',') { row.push(cell); cell = ''; }
+        else if (ch === '\n') { row.push(cell.replace(/\r$/, '')); parsed.push(row); row=[]; cell=''; }
+        else cell += ch;
+      }
+    }
+    if (cell.length || row.length) { row.push(cell.replace(/\r$/, '')); parsed.push(row); }
+    if (parsed.length) {
+      const headers = parsed[0];
+      rows = parsed.slice(1).filter(r => r.some(Boolean)).map(r =>
+        Object.fromEntries(headers.map((h,i)=>[h, r[i] ?? '']))
+      );
+    }
+  }
+
+  res.json({
+    archive: {
+      ...archive,
+      videoBytes: directoryBytes(path.join(archiveDir, 'videos'))
+    },
+    manifest,
+    rows
+  });
+});
+
+app.get('/api/archives/:id/videos/:filename', (req, res) => {
+  const db = loadDB();
+  const archive = (db.archives || []).find(a => a.id === req.params.id);
+  if (!archive) return res.status(404).send('Archive not found.');
+
+  const filename = path.basename(req.params.filename);
+  const file = path.join(archivesDir, archive.id, 'videos', filename);
+  if (!fs.existsSync(file)) return res.status(404).send('Video not found.');
+  res.sendFile(file);
+});
+
+app.get(['/archive', '/archive.html'], (_, res) =>
+  res.sendFile(path.join(__dirname, 'public', 'archive.html'))
+);
 
 // -----------------------------------------------------------------------------
 // Questions
@@ -172,6 +518,14 @@ app.put('/api/questions', (req, res) => {
   }
 
   const db = loadDB();
+
+  if (hasActiveResearchData(db)) {
+    return res.status(409).json({
+      error: 'Archive the current session before changing video questions.',
+      archiveRequired: true,
+      counts: activeDataCounts(db)
+    });
+  }
 
   db.questions = incoming.map((q, i) => ({
     id: q.id || `q${i + 1}`,
@@ -196,6 +550,14 @@ app.get('/api/poll-questions', (_, res) => {
 app.put('/api/poll-questions', (req, res) => {
   const incoming = Array.isArray(req.body) ? req.body : [];
   const db = loadDB();
+
+  if (hasActiveResearchData(db)) {
+    return res.status(409).json({
+      error: 'Archive the current session before changing quick-poll questions.',
+      archiveRequired: true,
+      counts: activeDataCounts(db)
+    });
+  }
 
   db.pollQuestions = incoming
     .map((q, i) => ({
@@ -348,7 +710,11 @@ app.get('/api/research-data', (_, res) => {
       questionId: c.questionId || '',
       question: c.question || '',
       recordedAt: c.recordedAt,
-      url: c.url
+      url: c.url,
+      boothId: c.boothId || '',
+      locationId: c.locationId || '',
+      deviceId: c.deviceId || '',
+      recordingFPS: c.recordingFPS || 25
     }));
 
     return {
@@ -632,7 +998,15 @@ app.post('/api/upload', upload.single('video'), (req, res) => {
         new Date().toISOString(),
       boothId:
         req.body.boothId ||
-        'prototype-booth'
+        'prototype-booth',
+      locationId:
+        req.body.locationId ||
+        'unassigned',
+      deviceId:
+        req.body.deviceId ||
+        '',
+      recordingFPS:
+        Number(req.body.recordingFPS) === 30 ? 30 : 25
     };
 
     db.clips.unshift(clip);
