@@ -31,7 +31,7 @@ button.secondary{background:var(--teal);color:#071312}.pass{text-align:center}.p
     <label>Gender (optional)</label><select name="gender"><option value="">Prefer not to say</option><option>Female</option><option>Male</option><option>Non-binary</option><option>Self-described</option></select>
     <label class="check"><input type="checkbox" name="consent" required><span>I consent to being filmed and to my recorded responses being used for editorial, broadcast, digital and social-media purposes under the campaign terms.</span></label>
     <label class="check"><input type="checkbox" name="contactOK"><span>I may be contacted for a longer interview.</span></label>
-    <button>GET MY PASS</button>
+    <button>CONTINUE TO QUICK POLL</button>
   </form>
   <div id="out"></div>
 </div>
@@ -40,35 +40,73 @@ const f=document.querySelector('#f'),out=document.querySelector('#out');
 let participantId='',sessionToken='';
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 
-async function buildPoll(){
+function showPass(qrDataURL){
+  out.innerHTML=`<div class="card pass">
+    <h2>Your THE BOOTH pass</h2>
+    <p>Quick poll complete. Show this QR code to the booth camera.</p>
+    <img src="${qrDataURL}">
+    <p class="small">Keep this screen open until your Booth recording starts.</p>
+  </div>`;
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+async function buildRequiredPoll(){
   const qs=await (await fetch('/api/poll-questions',{cache:'no-store'})).json();
   if(!qs.length)return '';
   return `<div class="card" id="pollCard">
-    <h2>While you wait…</h2>
-    <p class="small">Optional quick poll. Your answers are combined with everyone else's for live results.</p>
+    <h2>Quick poll</h2>
+    <p><b>One quick step before your Booth recording.</b></p>
+    <p class="small">Please answer each question below. Your Booth QR pass will appear after you submit the poll.</p>
     <form id="pollForm">
-      ${qs.map(q=>`<div class="pollQ"><h3>${esc(q.text)}</h3>${q.options.map(o=>`<label class="choice"><input type="radio" name="${esc(q.id)}" value="${esc(o)}"><span>${esc(o)}</span></label>`).join('')}</div>`).join('')}
-      <button class="secondary" type="submit">SEND MY POLL ANSWERS</button>
-    </form><div id="pollStatus"></div>
+      ${qs.map(q=>`<div class="pollQ"><h3>${esc(q.text)}</h3>${q.options.map(o=>`<label class="choice"><input required type="radio" name="${esc(q.id)}" value="${esc(o)}"><span>${esc(o)}</span></label>`).join('')}</div>`).join('')}
+      <button class="secondary" type="submit">SUBMIT POLL &amp; GET MY BOOTH PASS</button>
+    </form>
+    <div id="pollStatus"></div>
   </div>`;
 }
 
 f.onsubmit=async e=>{
   e.preventDefault();
-  const d=Object.fromEntries(new FormData(f));d.consent=!!d.consent;d.contactOK=!!d.contactOK;
-  const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
-  const j=await r.json();if(!r.ok){alert(j.error);return}
-  participantId=j.participantId;sessionToken=j.sessionToken;
-  out.innerHTML=`<div class="card pass"><h2>Your THE BOOTH pass</h2><p>Show this QR code to the booth camera.</p><img src="${j.qrDataURL}"><p class="small">Keep this screen open while you wait.</p></div>${await buildPoll()}`;
-  f.style.display='none';
-  const pf=document.querySelector('#pollForm');
-  if(pf){pf.onsubmit=async ev=>{
-    ev.preventDefault();const raw=Object.fromEntries(new FormData(pf));
-    const rr=await fetch('/api/poll-response',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId,sessionToken,answers:raw})});
-    const jj=await rr.json(),status=document.querySelector('#pollStatus');
-    if(!rr.ok){status.innerHTML=`<p>${esc(jj.error||'Could not save poll.')}</p>`;return}
-    pf.style.display='none';status.innerHTML='<div class="success"><b>Thank you.</b> Your poll answers have been added to the live results.</div>';
-  }}
+  const submit=f.querySelector('button');
+  submit.disabled=true;submit.textContent='PLEASE WAIT…';
+  try{
+    const d=Object.fromEntries(new FormData(f));d.consent=!!d.consent;d.contactOK=!!d.contactOK;
+    const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+    const j=await r.json();if(!r.ok){alert(j.error);return}
+    participantId=j.participantId;sessionToken=j.sessionToken;
+    f.style.display='none';
+
+    if(!j.pollRequired){
+      showPass(j.qrDataURL);
+      return;
+    }
+
+    out.innerHTML=await buildRequiredPoll();
+    const pf=document.querySelector('#pollForm');
+    if(!pf){
+      out.innerHTML='<div class="card"><p>Could not load the quick poll. Please ask a staff member for assistance.</p></div>';
+      return;
+    }
+
+    pf.onsubmit=async ev=>{
+      ev.preventDefault();
+      const pollButton=pf.querySelector('button');
+      pollButton.disabled=true;pollButton.textContent='SAVING…';
+      const raw=Object.fromEntries(new FormData(pf));
+      const rr=await fetch('/api/poll-response',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId,sessionToken,answers:raw})});
+      const jj=await rr.json();
+      if(!rr.ok){
+        document.querySelector('#pollStatus').innerHTML=`<p>${esc(jj.error||'Could not save poll.')}</p>`;
+        pollButton.disabled=false;pollButton.textContent='SUBMIT POLL & GET MY BOOTH PASS';
+        return;
+      }
+      showPass(jj.qrDataURL);
+    };
+  }catch(err){
+    alert('Could not connect to THE BOOTH server. Please try again.');
+  }finally{
+    submit.disabled=false;submit.textContent='CONTINUE TO QUICK POLL';
+  }
 };
 </script>
 </body>

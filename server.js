@@ -218,45 +218,74 @@ app.put('/api/poll-questions', (req, res) => {
   res.json(db.pollQuestions);
 });
 
-app.post('/api/poll-response', (req, res) => {
-  const { participantId, sessionToken, answers } = req.body || {};
-  const db = loadDB();
+app.post('/api/poll-response', async (req, res) => {
+  try {
+    const { participantId, sessionToken, answers } = req.body || {};
+    const db = loadDB();
 
-  const session = db.sessions[sessionToken];
-  if (!participantId || !session || session.participantId !== participantId) {
-    return res.status(400).json({ error: 'Invalid participant or session.' });
-  }
-
-  if (!answers || typeof answers !== 'object') {
-    return res.status(400).json({ error: 'No poll answers supplied.' });
-  }
-
-  const cleanedAnswers = {};
-  for (const q of db.pollQuestions.filter(q => q.enabled)) {
-    const answer = String(answers[q.id] || '').trim();
-    if (answer && q.options.includes(answer)) {
-      cleanedAnswers[q.id] = answer;
+    const session = db.sessions[sessionToken];
+    if (!participantId || !session || session.participantId !== participantId) {
+      return res.status(400).json({ error: 'Invalid participant or session.' });
     }
+
+    if (!answers || typeof answers !== 'object') {
+      return res.status(400).json({ error: 'No poll answers supplied.' });
+    }
+
+    const requiredQuestions = db.pollQuestions.filter(q => q.enabled);
+    const cleanedAnswers = {};
+    const missing = [];
+
+    for (const q of requiredQuestions) {
+      const answer = String(answers[q.id] || '').trim();
+      if (answer && q.options.includes(answer)) {
+        cleanedAnswers[q.id] = answer;
+      } else {
+        missing.push(q.id);
+      }
+    }
+
+    // If a quick poll is configured, every enabled question must be answered
+    // before the participant receives a booth QR pass.
+    if (requiredQuestions.length && missing.length) {
+      return res.status(400).json({
+        error: 'Please answer every quick poll question before continuing.',
+        missingQuestionIds: missing
+      });
+    }
+
+    db.pollResponses = db.pollResponses.filter(
+      r => !(r.participantId === participantId && r.sessionToken === sessionToken)
+    );
+
+    db.pollResponses.push({
+      id: token(),
+      participantId,
+      sessionToken,
+      answers: cleanedAnswers,
+      createdAt: new Date().toISOString()
+    });
+
+    session.pollCompleted = true;
+    session.pollCompletedAt = new Date().toISOString();
+    saveDB(db);
+
+    const qrDataURL = await QRCode.toDataURL(sessionToken, {
+      width: 420,
+      margin: 1
+    });
+
+    res.json({
+      ok: true,
+      answered: Object.keys(cleanedAnswers).length,
+      pollCompleted: true,
+      sessionToken,
+      qrDataURL
+    });
+  } catch (error) {
+    console.error('Poll response error:', error);
+    res.status(500).json({ error: 'Could not save the quick poll.' });
   }
-
-  if (!Object.keys(cleanedAnswers).length) {
-    return res.status(400).json({ error: 'Please answer at least one poll question.' });
-  }
-
-  db.pollResponses = db.pollResponses.filter(
-    r => !(r.participantId === participantId && r.sessionToken === sessionToken)
-  );
-
-  db.pollResponses.push({
-    id: token(),
-    participantId,
-    sessionToken,
-    answers: cleanedAnswers,
-    createdAt: new Date().toISOString()
-  });
-
-  saveDB(db);
-  res.json({ ok: true, answered: Object.keys(cleanedAnswers).length });
 });
 
 app.get('/api/poll-results', (_, res) => {
@@ -391,8 +420,9 @@ app.post('/api/register', async (req, res) => {
 
     const participantId = token();
     const sessionToken = token();
-
     const db = loadDB();
+    const enabledPollQuestions = db.pollQuestions.filter(q => q.enabled);
+    const pollRequired = enabledPollQuestions.length > 0;
 
     db.participants[participantId] = {
       id: participantId,
@@ -412,24 +442,28 @@ app.post('/api/register', async (req, res) => {
       participantId,
       verified: true,
       used: false,
+      pollRequired,
+      pollCompleted: !pollRequired,
       createdAt: new Date().toISOString()
     };
 
     saveDB(db);
 
-    const qrPayload = `${PUBLIC_BASE_URL}/pass.html?t=${encodeURIComponent(
-      sessionToken
-    )}`;
-
-    const qrDataURL = await QRCode.toDataURL(sessionToken, {
-      width: 420,
-      margin: 1
-    });
+    // The QR is deliberately withheld until the required quick poll is complete.
+    // If no poll questions are enabled, the participant can receive a pass now.
+    let qrDataURL = null;
+    if (!pollRequired) {
+      qrDataURL = await QRCode.toDataURL(sessionToken, {
+        width: 420,
+        margin: 1
+      });
+    }
 
     res.json({
       participantId,
       sessionToken,
-      qrPayload,
+      pollRequired,
+      pollCompleted: !pollRequired,
       qrDataURL,
       demoVerification:
         'Prototype auto-verifies registration. Replace with SMS/email OTP in production.'
@@ -452,6 +486,14 @@ app.get('/api/session/:token', (req, res) => {
     return res
       .status(404)
       .json({ error: 'Pass not found or not verified.' });
+  }
+
+  if (session.pollRequired && !session.pollCompleted) {
+    return res.status(403).json({
+      error: 'Quick poll must be completed before this Booth pass can be used.',
+      pollRequired: true,
+      pollCompleted: false
+    });
   }
 
   const participant = db.participants[session.participantId];
